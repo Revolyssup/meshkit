@@ -1,7 +1,6 @@
 package kubernetes
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,7 +46,6 @@ const (
 	INSTALL HelmChartAction = iota
 	UPGRADE
 	UNINSTALL
-	TEMPLATE
 )
 
 const (
@@ -456,25 +454,6 @@ func generateAction(actionConfig *action.Configuration, cfg ApplyHelmChartConfig
 			act.Namespace = cfg.Namespace
 			act.DryRun = cfg.DryRun
 			if _, err := act.Run(c.Name(), c, cfg.OverrideValues); err != nil {
-				return ErrApplyHelmChart(err)
-			}
-			return nil
-		}
-	case TEMPLATE:
-		return func(c *chart.Chart) error {
-			act := action.NewInstall(actionConfig)
-			act.ReleaseName = "test-release"
-			act.CreateNamespace = true
-			act.Namespace = "default"
-			act.DryRun = true
-			rel, err := act.Run(c, cfg.OverrideValues)
-			if err != nil {
-				return ErrApplyHelmChart(err)
-			}
-			var manifests bytes.Buffer
-			fmt.Fprintln(&manifests, strings.TrimSpace(rel.Manifest))
-			_, err = cfg.TemplateOut.Write(manifests.Bytes())
-			if err != nil {
 				return ErrApplyHelmChart(err)
 			}
 			return nil
