@@ -2,10 +2,12 @@ package kubernetes
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/layer5io/meshkit/utils"
 	"gopkg.in/yaml.v2"
@@ -192,21 +194,23 @@ type ApplyHelmChartConfig struct {
 // Examples:
 //
 // Install Traefik Mesh using URL:
-//    err = client.ApplyHelmChart(k8s.ApplyHelmChartConfig{
-//            Namespace:       "traefik-mesh",
-//            CreateNamespace: true,
-//            URL:             "https://helm.traefik.io/mesh/traefik-mesh-3.0.6.tgz",
-//    })
+//
+//	err = client.ApplyHelmChart(k8s.ApplyHelmChartConfig{
+//	        Namespace:       "traefik-mesh",
+//	        CreateNamespace: true,
+//	        URL:             "https://helm.traefik.io/mesh/traefik-mesh-3.0.6.tgz",
+//	})
 //
 // Install Traefik Mesh using repository:
-//    err = cl.ApplyHelmChart(k8s.ApplyHelmChartConfig{
-//            ChartLocation: k8s.HelmChartLocation{
-//                Repository: "https://helm.traefik.io/mesh",
-//                Chart:      "traefik-mesh",
-//            },
-//            Namespace:       "traefik-mesh",
-//            CreateNamespace: true,
-//    })
+//
+//	err = cl.ApplyHelmChart(k8s.ApplyHelmChartConfig{
+//	        ChartLocation: k8s.HelmChartLocation{
+//	            Repository: "https://helm.traefik.io/mesh",
+//	            Chart:      "traefik-mesh",
+//	        },
+//	        Namespace:       "traefik-mesh",
+//	        CreateNamespace: true,
+//	})
 //
 // Install Consul Service Mesh overriding values using a values file (equivalent to -f/--values in helm):
 //
@@ -228,7 +232,6 @@ type ApplyHelmChartConfig struct {
 //		},
 //		OverrideValues: vals,
 //	})
-//
 func (client *Client) ApplyHelmChart(cfg ApplyHelmChartConfig) error {
 	setupDefaults(&cfg)
 
@@ -392,16 +395,34 @@ func checkIfInstallable(ch *chart.Chart) error {
 	return ErrApplyHelmChart(fmt.Errorf("%s charts are not installable", ch.Metadata.Type))
 }
 
+var mx sync.Mutex
+
 // createHelmActionConfig generates the actionConfig with the appropriate defaults
 func createHelmActionConfig(restConfig rest.Config, cfg ApplyHelmChartConfig) (*action.Configuration, error) {
+	mx.Lock()         //We need the lock here because we are setting environment variables to signal helm about kubeconfig data and two functions might concurrently try to set these variable causing issues.
+	defer mx.Unlock() //Once we exist this function, we can release the lock and environment variables can be reset by another function as the input to helm would have been set by the end of this function.
 	// Set the environment variable needed by the Init method
 	os.Setenv("HELM_DRIVER_SQL_CONNECTION_STRING", cfg.SQLConnectionString)
-
+	os.Setenv("HELM_KUBEAPISERVER", restConfig.Host)
+	os.Setenv("HELM_KUBETOKEN", restConfig.BearerToken)
+	f, err := os.CreateTemp("", "*")
+	if err != nil {
+		return nil, fmt.Errorf("could not create temporary CAFile: " + err.Error())
+	}
+	defer func() {
+		_ = os.Remove(f.Name())
+	}()
+	_, err = io.WriteString(f, restConfig.CAFile)
+	if err != nil {
+		return nil, fmt.Errorf("could not create temporary CAFile: " + err.Error())
+	}
+	os.Setenv("HELM_KUBECAFILE", f.Name())
 	// KubeConfig setup
 	kubeConfig := genericclioptions.NewConfigFlags(false)
-	kubeConfig.APIServer = &restConfig.Host
-	kubeConfig.BearerToken = &restConfig.BearerToken
-	kubeConfig.CAFile = &restConfig.CAFile
+	//We were setting the below fields earlier but it is of no use as helm cli function doesn't respect these passed fields.
+	// kubeConfig.APIServer = &restConfig.Host
+	// kubeConfig.BearerToken = &restConfig.BearerToken
+	// kubeConfig.CAFile = &restConfig.CAFile
 
 	actionConfig := new(action.Configuration)
 	if err := actionConfig.Init(kubeConfig, cfg.Namespace, string(cfg.HelmDriver), cfg.Logger); err != nil {
